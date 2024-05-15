@@ -12,7 +12,7 @@ def project_onto_direction(H, direction):
     if type(direction) != torch.Tensor:
         H = torch.Tensor(H).cuda()
     if type(direction) != torch.Tensor:
-        direction = torch.Tensor(direction)
+        direction = torch.Tensor(direction).to(H.dtype)
         direction = direction.to(H.device)
     mag = torch.norm(direction)
     assert not torch.isinf(mag).any()
@@ -83,7 +83,7 @@ class RepReader(ABC):
         if self.needs_hiddens and hidden_states is not None and len(hidden_states) > 0:
             for layer in hidden_layers:    
                 assert hidden_states[layer].shape[0] == 2 * len(train_choices), f"Shape mismatch between hidden states ({hidden_states[layer].shape[0]}) and labels ({len(train_choices)})"
-                
+
                 signs[layer] = []
                 for component_index in range(self.n_components):
                     transformed_hidden_states = project_onto_direction(hidden_states[layer], self.directions[layer][component_index])
@@ -199,11 +199,16 @@ class ClusterMeanRepReader(RepReader):
         train_choices = kwargs['train_choices'] if 'train_choices' in kwargs else None
         assert train_choices is not None, "ClusterMeanRepReader requires train_choices to differentiate two clusters"
         for layer in hidden_layers:
-            assert len(train_choices) == len(hidden_states[layer]), f"Shape mismatch between hidden states ({len(hidden_states[layer])}) and labels ({len(train_choices)})"
+            assert 2 * len(train_choices) == len(hidden_states[layer]), f"Shape mismatch between hidden states ({len(hidden_states[layer])}) and labels ({len(train_choices)})"
 
         train_choices = np.array(train_choices)
-        neg_class = np.where(train_choices == 0)
-        pos_class = np.where(train_choices == 1)
+        # neg_class = np.where(train_choices == 0).reshape(-1)
+        # pos_class = np.where(train_choices == 1).reshape(-1)
+        neg_class = np.where(train_choices.reshape(-1) == 0)[0].reshape(-1)
+        pos_class = np.where(train_choices.reshape(-1) == 1)[0].reshape(-1)
+
+        # print(neg_class)
+        # print(pos_class)
 
         directions = {}
         for layer in hidden_layers:
@@ -211,9 +216,17 @@ class ClusterMeanRepReader(RepReader):
 
             H_pos_mean = H_train[pos_class].mean(axis=0, keepdims=True)
             H_neg_mean = H_train[neg_class].mean(axis=0, keepdims=True)
+            H_mean = H_pos_mean - H_neg_mean
+            H_mean = H_mean / np.linalg.norm(H_mean)
+            directions[layer] = H_mean
 
-            directions[layer] = H_pos_mean - H_neg_mean
-        
+            # H_pos_mean = H_train[pos_class]
+            # H_neg_mean = H_train[neg_class]
+            # H_all = np.concatenate([H_pos_mean, -H_neg_mean], axis=0)
+            # H_all_mean = H_all.mean(axis=0, keepdims=True)
+            # H_all_mean = H_all_mean / np.linalg.norm(H_all_mean)
+            # directions[layer] = H_all_mean
+
         return directions
 
 

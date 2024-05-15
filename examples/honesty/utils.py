@@ -7,7 +7,8 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib.colors import LinearSegmentedColormap
 
-def honesty_function_dataset(data_path: str, tokenizer: PreTrainedTokenizer, user_tag: str = "", assistant_tag: str = "", seed: int = 0) -> (list, list):
+def ours_honesty_function_dataset(data_path: str, tokenizer: PreTrainedTokenizer, user_tag: str = "", assistant_tag: str = "", seed: int = 0,
+                                  ntrain=512, exclude=5) -> (list, list):
     """
     Processes data to create training and testing datasets based on honesty.
 
@@ -30,23 +31,123 @@ def honesty_function_dataset(data_path: str, tokenizer: PreTrainedTokenizer, use
     true_statements = df[df['label'] == 1]['statement'].values.tolist()
     false_statements = df[df['label'] == 0]['statement'].values.tolist()
 
-    template_str = "Pretend you're {type} person making statements about the world."
+    honest_statements = []
+    untruthful_statements = []
+
+    # Process statements
+    for true_statement, false_statement in zip(true_statements, false_statements):
+        true_tokens = tokenizer.tokenize(true_statement)
+        false_tokens = tokenizer.tokenize(false_statement)
+
+        for idx in range(0, min(len(true_tokens), len(false_tokens)) - 1):
+            if idx == 0:
+                true_truncated_tokens = true_tokens
+            else:
+                true_truncated_tokens = true_tokens[:-idx]
+            true_truncated_statement = tokenizer.convert_tokens_to_string(true_truncated_tokens)
+
+            if idx == 0:
+                false_truncated_tokens = false_tokens
+            else:
+                false_truncated_tokens = false_tokens[:-idx]
+            false_truncated_statement = tokenizer.convert_tokens_to_string(false_truncated_tokens)
+
+            if len(true_truncated_tokens) > 128 or len(false_truncated_tokens) > 128:
+                continue
+
+            if len(true_truncated_statement.split("\n")) == 2 and len(false_truncated_statement.split("\n")) == 2:
+                # if true_truncated_statement.split("\n")[-1] == false_truncated_statement.split("\n")[-1]:
+                input_str, output_str_1 = true_truncated_statement.split("\n", 1)
+                f_input_str, f_output_str_1 = false_truncated_statement.split("\n", 1)
+
+                assert input_str == f_input_str
+
+                if output_str_1 != f_output_str_1:
+                
+                    if user_tag.endswith("\n"):
+                        honest_statements.append(f"{user_tag}{input_str}\n{assistant_tag}" + f"{output_str_1}")
+                    else:
+                        honest_statements.append(f"{user_tag} {input_str} {assistant_tag} " + f"{output_str_1}")
+
+                    if user_tag.endswith("\n"):
+                        untruthful_statements.append(f"{user_tag}{f_input_str}\n{assistant_tag}" + f"{f_output_str_1}")
+                    else:
+                        untruthful_statements.append(f"{user_tag} {f_input_str} {assistant_tag} " + f"{f_output_str_1}")
+
+    # Create training data
+    # ntrain = 512
+    combined_data = [[honest, untruthful] for honest, untruthful in zip(honest_statements, untruthful_statements)]
+    train_data = combined_data[:ntrain]
+
+    train_labels = []
+    for d in train_data:
+        true_s = d[0]
+        random.shuffle(d)
+        if d[0] == true_s:
+            train_labels.append([True, False])
+        else:
+            train_labels.append([False, True])
+        # train_labels.append([s == true_s for s in d])
+    
+    train_data = np.concatenate(train_data).tolist()
+
+    # Create test data
+    reshaped_data = np.array([[honest, untruthful] for honest, untruthful in zip(honest_statements[:-1], untruthful_statements[1:])]).flatten()
+    test_data = reshaped_data[ntrain:ntrain*2].tolist()
+
+    print(f"Train data: {len(train_data)}")
+    print(f"Test data: {len(test_data)}")
+
+    return {
+        'train': {'data': train_data, 'labels': train_labels},
+        'test': {'data': test_data, 'labels': [[1,0]] * len(test_data)}
+    }
+
+def honesty_function_dataset(data_path: str, tokenizer: PreTrainedTokenizer, user_tag: str = "", assistant_tag: str = "", seed: int = 0,
+                             positive_tag="an honest person", negative_tag="an untruthful person", ntrain=512, exclude=5) -> (list, list):
+    """
+    Processes data to create training and testing datasets based on honesty.
+
+    Args:
+    - data_path (str): Path to the CSV containing the data.
+    - tokenizer (PreTrainedTokenizer): Tokenizer to tokenize statements.
+    - user_tag (str): Instruction template.
+    - assistant_tag (str): Instruction template user tag.
+    - seed (int): Random seed for reproducibility.
+
+    Returns:
+    - Tuple containing train and test data.
+    """
+
+    # Setting the seed for reproducibility
+    random.seed(seed)
+
+    # Load the data
+    df = pd.read_csv(data_path)
+    true_statements = df[df['label'] == 1]['statement'].values.tolist()
+    false_statements = df[df['label'] == 0]['statement'].values.tolist()
+
+    template_str = "Pretend you're {type} making statements about the world."
     honest_statements = []
     untruthful_statements = []
 
     # Process statements
     for statement in true_statements:
         tokens = tokenizer.tokenize(statement)
-        
-        for idx in range(1, len(tokens) - 5):
+
+        for idx in range(1, min(len(tokens) - exclude, 128)):
             truncated_tokens = tokens[:idx]
             truncated_statement = tokenizer.convert_tokens_to_string(truncated_tokens)
 
-            honest_statements.append(f"{user_tag} {template_str.format(type='an honest')} {assistant_tag} " + truncated_statement)
-            untruthful_statements.append(f"{user_tag} {template_str.format(type='an untruthful')} {assistant_tag} " + truncated_statement)
+            if user_tag.endswith("\n"):
+                honest_statements.append(f"{user_tag}{template_str.format(type=positive_tag)}\n{assistant_tag}" + truncated_statement)
+                untruthful_statements.append(f"{user_tag}{template_str.format(type=negative_tag)}\n{assistant_tag}" + truncated_statement)
+            else:
+                honest_statements.append(f"{user_tag} {template_str.format(type=positive_tag)} {assistant_tag} " + truncated_statement)
+                untruthful_statements.append(f"{user_tag} {template_str.format(type=negative_tag)} {assistant_tag} " + truncated_statement)
 
     # Create training data
-    ntrain = 512
+    # ntrain = 512
     combined_data = [[honest, untruthful] for honest, untruthful in zip(honest_statements, untruthful_statements)]
     train_data = combined_data[:ntrain]
 
@@ -70,7 +171,7 @@ def honesty_function_dataset(data_path: str, tokenizer: PreTrainedTokenizer, use
         'test': {'data': test_data, 'labels': [[1,0]] * len(test_data)}
     }
 
-def plot_detection_results(input_ids, rep_reader_scores_dict, THRESHOLD, start_answer_token=":"):
+def plot_detection_results(input_ids, rep_reader_scores_dict, THRESHOLD, start_answer_token=":", y_sep=3):
 
     cmap=LinearSegmentedColormap.from_list('rg',["r", (255/255, 255/255, 224/255), "g"], N=256)
     colormap = cmap
@@ -155,7 +256,7 @@ def plot_detection_results(input_ids, rep_reader_scores_dict, THRESHOLD, start_a
             if x + word_width > max_line_width:
                 # Move to next line
                 x = x_start
-                y -= 3
+                y -= y_sep
 
             # Compute the width of the current word
             text = ax.text(x, y, word, fontsize=13)
@@ -177,13 +278,13 @@ def plot_detection_results(input_ids, rep_reader_scores_dict, THRESHOLD, start_a
         iter += 1
 
 
-def plot_lat_scans(input_ids, rep_reader_scores_dict, layer_slice):
+def plot_lat_scans(input_ids, rep_reader_scores_dict, layer_slice, max_new_tokens=40, adj=1, start_input_id="_A"):
     for rep, scores in rep_reader_scores_dict.items():
 
-        start_tok = input_ids.index('▁A')
+        start_tok = input_ids.index(start_input_id)
         print(start_tok, np.array(scores).shape)
-        standardized_scores = np.array(scores)[start_tok:start_tok+40,layer_slice]
-        # print(standardized_scores.shape)
+        standardized_scores = np.array(scores)[start_tok:start_tok+max_new_tokens,layer_slice]
+        print(np.array(scores).shape, standardized_scores.shape, start_tok, start_tok+max_new_tokens)
 
         bound = np.mean(standardized_scores) + np.std(standardized_scores)
         bound = 2.3
@@ -196,8 +297,12 @@ def plot_lat_scans(input_ids, rep_reader_scores_dict, layer_slice):
         
         cmap = 'coolwarm'
 
-        fig, ax = plt.subplots(figsize=(5, 4), dpi=200)
-        sns.heatmap(-standardized_scores.T, cmap=cmap, linewidth=0.5, annot=False, fmt=".3f", vmin=-bound, vmax=bound)
+        linewidth = 0.5
+        # if max_new_tokens != 40:
+        #     linewidth = 1.0 / (max_new_tokens / 40)
+
+        fig, ax = plt.subplots(figsize=(5 * (max_new_tokens / 40) * adj, 4), dpi=200)
+        sns.heatmap(-standardized_scores.T, cmap=cmap, linewidth=linewidth, annot=False, fmt=".3f", vmin=-bound, vmax=bound)
         ax.tick_params(axis='y', rotation=0)
 
         ax.set_xlabel("Token Position")#, fontsize=20)
@@ -210,6 +315,6 @@ def plot_lat_scans(input_ids, rep_reader_scores_dict, layer_slice):
         ax.tick_params(axis='x', rotation=0)
 
         ax.set_yticks(np.arange(0, len(standardized_scores[0]), 5)[1:])
-        ax.set_yticklabels(np.arange(20, len(standardized_scores[0])+20, 5)[::-1][1:])#, fontsize=20)
+        ax.set_yticklabels(np.arange(20, len(standardized_scores[0])+20, 5)[1:][::-1])#, fontsize=20)
         ax.set_title("LAT Neural Activity")#, fontsize=30)
     plt.show()
